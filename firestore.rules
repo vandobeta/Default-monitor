@@ -1,0 +1,94 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: tested_commands
+    // Document ID: {vid}_{pid}_{mode}
+    // Fields:
+    //   - vid: string (required) - Vendor ID
+    //   - pid: string (required) - Product ID
+    //   - mode: string (required) - Mode (e.g., ADB, Fastboot)
+    //   - commands: list of strings (required) - Command sequence
+    //   - successCount: number (required) - Number of successful uses
+    //   - lastUpdated: string (required) - ISO 8601 date string
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "vandosavage256@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidCommandList(list) {
+      return list is list && list.size() > 0 && list.size() <= 50;
+    }
+
+    function isValidTestedCommand(data) {
+      return hasOnlyAllowedFields(['vid', 'pid', 'mode', 'commands', 'successCount', 'lastUpdated']) &&
+             hasRequiredFields(['vid', 'pid', 'mode', 'commands', 'successCount', 'lastUpdated']) &&
+             data.vid is string && data.vid.size() > 0 && data.vid.size() <= 10 &&
+             data.pid is string && data.pid.size() > 0 && data.pid.size() <= 10 &&
+             data.mode is string && data.mode.size() > 0 && data.mode.size() <= 20 &&
+             isValidCommandList(data.commands) &&
+             data.successCount is number && data.successCount >= 0 &&
+             isValidDateString(data.lastUpdated);
+    }
+
+    function isValidTestedCommandUpdate() {
+      let diff = request.resource.data.diff(resource.data);
+      let affectedKeys = diff.affectedKeys();
+      
+      // Allow updating successCount and lastUpdated
+      return affectedKeys.hasOnly(['successCount', 'lastUpdated']) &&
+             request.resource.data.successCount == resource.data.successCount + 1 &&
+             isValidDateString(request.resource.data.lastUpdated);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /tested_commands/{commandId} {
+      // Anyone can read the tested commands
+      allow read: if true;
+      
+      // Authenticated users can create new command sequences
+      allow create: if isAuthenticated() && 
+                    isValidTestedCommand(request.resource.data) &&
+                    request.resource.data.successCount == 1;
+                    
+      // Authenticated users can increment the success count
+      allow update: if isAuthenticated() && 
+                    isValidTestedCommand(request.resource.data) &&
+                    isValidTestedCommandUpdate();
+                    
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+  }
+}

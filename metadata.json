@@ -1,0 +1,9 @@
+{
+  "name": "Remix: UnlockPro - Online Phone Unlocking Platform",
+  "description": "A professional full-stack platform for online phone unlocking featuring real authentication, Stripe payment gateway, and WebUSB integration for hardware-level unlocks.",
+  "requestFramePermissions": [
+    "usb",
+    "serial",
+    "hid"
+  ]
+}

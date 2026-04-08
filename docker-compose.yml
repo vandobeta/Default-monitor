@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  unlockpro:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: unlockpro-prod
+    ports:
+      - "3000:3000"
+    volumes:
+      - unlockpro_data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/unlockpro.db
+      - JWT_SECRET=${JWT_SECRET:-fallback-secret-key-change-in-prod}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - FLUTTERWAVE_PUBLIC_KEY=${FLUTTERWAVE_PUBLIC_KEY}
+      - FLUTTERWAVE_SECRET_KEY=${FLUTTERWAVE_SECRET_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPO_URL=${GITHUB_REPO_URL}
+    restart: unless-stopped
+
+volumes:
+  unlockpro_data:
+    name: unlockpro_data

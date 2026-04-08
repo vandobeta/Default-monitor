@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "TestedCommandSequence": {
+      "title": "TestedCommandSequence",
+      "description": "A sequence of commands that has been successfully tested for a specific device and mode.",
+      "type": "object",
+      "properties": {
+        "vid": {
+          "type": "string",
+          "description": "Vendor ID of the device."
+        },
+        "pid": {
+          "type": "string",
+          "description": "Product ID of the device."
+        },
+        "mode": {
+          "type": "string",
+          "description": "The mode of the device (e.g., ADB, Fastboot, EDL)."
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The sequence of commands."
+        },
+        "successCount": {
+          "type": "number",
+          "description": "The number of times this sequence has been successfully used."
+        },
+        "lastUpdated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The last time this sequence was updated."
+        }
+      },
+      "required": ["vid", "pid", "mode", "commands", "successCount", "lastUpdated"]
+    }
+  },
+  "firestore": {
+    "/tested_commands/{commandId}": {
+      "schema": {
+        "$ref": "#/entities/TestedCommandSequence"
+      },
+      "description": "Stores tested command sequences."
+    }
+  }
+}
