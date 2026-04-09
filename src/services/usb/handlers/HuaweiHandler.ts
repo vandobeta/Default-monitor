@@ -8,6 +8,18 @@ import { USBTransport } from '../USBTransport';
 export class HuaweiKirinHandler {
   private transport: USBTransport;
 
+  // Kirin USB COM 1.0 Commands
+  private readonly KIRIN = {
+    HANDSHAKE_REQ: 0xFE,
+    HANDSHAKE_RSP: 0xED,
+    CMD_LOAD_XLOADER: 0x01,
+    CMD_READ_OEMINFO: 0x02,
+    CMD_FLASH_BOARD: 0x03,
+    CMD_RESET_ID: 0x04,
+    CMD_UNLOCK_FRP: 0x05,
+    CMD_REBOOT_FASTBOOT: 0x06
+  };
+
   constructor(transport: USBTransport) {
     this.transport = transport;
   }
@@ -16,14 +28,15 @@ export class HuaweiKirinHandler {
    * Kirin Handshake: Send 0xFE and wait for 0xED.
    */
   async handshake(): Promise<void> {
-    const ping = new Uint8Array([0xFE]);
-    await this.transport.send(ping);
+    await this.transport.connect();
     
-    const pong = await this.transport.receive(1);
-    const view = new DataView(pong.buffer);
+    const ping = new Uint8Array([this.KIRIN.HANDSHAKE_REQ]);
+    await this.transport.write(ping);
     
-    if (view.getUint8(0) !== 0xED) {
-      throw new Error("Huawei Kirin Handshake Failed: Invalid Pong");
+    const pong = await this.transport.read(1);
+    
+    if (pong[0] !== this.KIRIN.HANDSHAKE_RSP) {
+      throw new Error(`Huawei Kirin Handshake Failed: Expected 0xED, got 0x${pong[0].toString(16)}`);
     }
     
     console.log("[Huawei] Kirin Handshake Successful");
@@ -40,8 +53,8 @@ export class HuaweiKirinHandler {
     view.setUint8(0, command);
     view.setUint16(1, dataLength, true); // Little-endian
     
-    await this.transport.send(header);
-    if (data) await this.transport.send(data);
+    await this.transport.write(header);
+    if (data) await this.transport.write(data);
   }
 
   /**
@@ -65,8 +78,8 @@ export class HuaweiKirinHandler {
    * Loads the xloader/bootloader image.
    */
   async loadXLoader(image: Uint8Array): Promise<void> {
-    await this.sendCommand(0x01, image);
-    const response = await this.transport.receive(1);
+    await this.sendCommand(this.KIRIN.CMD_LOAD_XLOADER, image);
+    const response = await this.transport.read(1);
     
     if (response[0] !== 0x00) {
       throw new Error(`Huawei xLoader Load Failed: ${response[0]}`);
@@ -79,8 +92,8 @@ export class HuaweiKirinHandler {
    * FRP Unlock Command (Specific to Kirin)
    */
   async unlockFRP(): Promise<void> {
-    await this.sendCommand(0x05); // FRP Unlock Command Code
-    const response = await this.transport.receive(1);
+    await this.sendCommand(this.KIRIN.CMD_UNLOCK_FRP); // FRP Unlock Command Code
+    const response = await this.transport.read(1);
     
     if (response[0] !== 0x00) {
       throw new Error("Huawei FRP Unlock Failed");
@@ -94,8 +107,8 @@ export class HuaweiKirinHandler {
    */
   async readOEMInfo(): Promise<Uint8Array> {
     console.log("[Huawei] Reading OEM Info...");
-    await this.sendCommand(0x02); // Dummy command for reading OEM info
-    const response = await this.transport.receive(1024);
+    await this.sendCommand(this.KIRIN.CMD_READ_OEMINFO); // Dummy command for reading OEM info
+    const response = await this.transport.read(1024);
     return response;
   }
 
@@ -104,8 +117,8 @@ export class HuaweiKirinHandler {
    */
   async flashBoardSoftware(): Promise<void> {
     console.log("[Huawei] Flashing Board Software...");
-    await this.sendCommand(0x03, new Uint8Array([0x01, 0x02, 0x03, 0x04])); // Dummy payload
-    const response = await this.transport.receive(1);
+    await this.sendCommand(this.KIRIN.CMD_FLASH_BOARD, new Uint8Array([0x01, 0x02, 0x03, 0x04])); // Dummy payload
+    const response = await this.transport.read(1);
     if (response[0] !== 0x00) {
       throw new Error("Huawei Flash Board Software Failed");
     }
@@ -117,8 +130,8 @@ export class HuaweiKirinHandler {
    */
   async resetHuaweiID(): Promise<void> {
     console.log("[Huawei] Resetting Huawei ID...");
-    await this.sendCommand(0x04); // Dummy command for resetting Huawei ID
-    const response = await this.transport.receive(1);
+    await this.sendCommand(this.KIRIN.CMD_RESET_ID); // Dummy command for resetting Huawei ID
+    const response = await this.transport.read(1);
     if (response[0] !== 0x00) {
       throw new Error("Huawei ID Reset Failed");
     }
@@ -130,7 +143,7 @@ export class HuaweiKirinHandler {
    */
   async rebootFastboot(): Promise<void> {
     console.log("[Huawei] Rebooting to Fastboot...");
-    await this.sendCommand(0x06); // Dummy command for rebooting to fastboot
+    await this.sendCommand(this.KIRIN.CMD_REBOOT_FASTBOOT); // Dummy command for rebooting to fastboot
     console.log("[Huawei] Device Rebooted to Fastboot");
   }
 }

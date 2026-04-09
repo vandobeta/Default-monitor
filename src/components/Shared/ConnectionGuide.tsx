@@ -49,7 +49,7 @@ export const ConnectionGuide = ({ onComplete }: { onComplete: () => void }) => {
 
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/90 backdrop-blur-xl" />
+      <div className="absolute inset-0 bg-black/90 backdrop-blur-md" />
       <GlassCard className="max-w-2xl w-full p-8 sm:p-12 liquid-glass relative z-10 space-y-8">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">

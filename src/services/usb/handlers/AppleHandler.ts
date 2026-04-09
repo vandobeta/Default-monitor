@@ -8,6 +8,32 @@ import { USBTransport } from '../USBTransport';
 export class AppleDfuHandler {
   private transport: USBTransport;
 
+  // DFU Class-Specific Requests
+  private readonly DFU = {
+    DETACH: 0,
+    DNLOAD: 1,
+    UPLOAD: 2,
+    GETSTATUS: 3,
+    CLRSTATUS: 4,
+    GETSTATE: 5,
+    ABORT: 6
+  };
+
+  // DFU States
+  private readonly DFU_STATE = {
+    appIDLE: 0,
+    appDETACH: 1,
+    dfuIDLE: 2,
+    dfuDNLOAD_SYNC: 3,
+    dfuDNBUSY: 4,
+    dfuDNLOAD_IDLE: 5,
+    dfuMANIFEST_SYNC: 6,
+    dfuMANIFEST: 7,
+    dfuMANIFEST_WAIT_RESET: 8,
+    dfuUPLOAD_IDLE: 9,
+    dfuERROR: 10
+  };
+
   constructor(transport: USBTransport) {
     this.transport = transport;
   }
@@ -16,16 +42,52 @@ export class AppleDfuHandler {
    * DFU Handshake: Get DFU Status.
    */
   async getDfuStatus(): Promise<Uint8Array> {
+    await this.transport.connect();
+    
     const response = await this.transport.controlTransferIn({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x03, // DFU_GETSTATUS
+      request: this.DFU.GETSTATUS,
       value: 0,
       index: 0
     }, 6);
     
     if (response.status !== 'ok' || !response.data) {
       throw new Error(`DFU GetStatus Failed: ${response.status}`);
+    }
+    
+    return new Uint8Array(response.data.buffer);
+  }
+
+  /**
+   * DFU Abort: Aborts the current DFU operation.
+   */
+  async dfuAbort(): Promise<void> {
+    console.log("[Apple] Sending DFU Abort...");
+    await this.transport.controlTransferOut({
+      requestType: 'class',
+      recipient: 'interface',
+      request: this.DFU.ABORT,
+      value: 0,
+      index: 0
+    });
+  }
+
+  /**
+   * DFU Upload: Reads data from the device.
+   */
+  async dfuUpload(length: number): Promise<Uint8Array> {
+    console.log(`[Apple] Requesting DFU Upload of ${length} bytes...`);
+    const response = await this.transport.controlTransferIn({
+      requestType: 'class',
+      recipient: 'interface',
+      request: this.DFU.UPLOAD,
+      value: 0,
+      index: 0
+    }, length);
+    
+    if (response.status !== 'ok' || !response.data) {
+      throw new Error(`DFU Upload Failed: ${response.status}`);
     }
     
     return new Uint8Array(response.data.buffer);
@@ -60,7 +122,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, groomData);
@@ -79,7 +141,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, payload);
@@ -94,7 +156,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, payload);
@@ -103,7 +165,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     });
@@ -118,7 +180,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x04, // DFU_CLRSTATUS
+      request: this.DFU.CLRSTATUS,
       value: 0,
       index: 0
     });
@@ -134,7 +196,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, new Uint8Array([0x00, 0x00, 0x00, 0x00]));
@@ -148,7 +210,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, new Uint8Array([0x01, 0x02, 0x03, 0x04])); // Dummy iBSS
@@ -162,7 +224,7 @@ export class AppleDfuHandler {
     await this.transport.controlTransferOut({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x01, // DFU_DNLOAD
+      request: this.DFU.DNLOAD,
       value: 0,
       index: 0
     }, new Uint8Array([0xBA, 0xAD, 0xF0, 0x0D])); // Dummy bypass payload
@@ -176,7 +238,7 @@ export class AppleDfuHandler {
     const response = await this.transport.controlTransferIn({
       requestType: 'class',
       recipient: 'interface',
-      request: 0x03, // DFU_GETSTATUS
+      request: this.DFU.GETSTATUS,
       value: 0,
       index: 0
     }, 256);

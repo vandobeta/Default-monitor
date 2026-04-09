@@ -66,6 +66,7 @@ export class WebFastboot implements USBProtocol {
   async handshake(logger: (msg: string) => void): Promise<boolean> {
     logger(`[${this.name}] Initiating Native Fastboot handshake...`);
     try {
+      await this.handler.connect();
       const product = await this.handler.getVar('product');
       logger(`[${this.name}] Device Product: ${product}`);
       return true;

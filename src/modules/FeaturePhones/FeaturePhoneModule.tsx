@@ -1,15 +1,13 @@
-import React, { useState, useCallback } from 'react';
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
-import { Smartphone, Zap, Cpu, Unlock, CheckCircle2, AlertCircle, ChevronRight, Usb } from 'lucide-react';
-import { motion } from 'motion/react';
+import React, { useState, useCallback, useEffect } from 'react';
+import { Smartphone, Zap, Cpu, Unlock, CheckCircle2, AlertCircle, ChevronRight, Usb, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { FeaturePhoneBackground } from '../../components/Animations/ModuleBackgrounds';
 import { User, Device, ServiceType, AppStep } from '../../types';
 import { GlassCard } from '../../components/Shared/GlassCard';
 import { Terminal } from '../../components/Shared/Terminal';
 import { cn } from '../../lib/utils';
 import { webUsb } from '../../services/webUsbService';
 import { hardwareService, DeviceIdentity, DeviceMode } from '../../services/hardwareService';
-import { githubService } from '../../services/githubService';
-import { mcpClient } from '../../services/mcp/McpClient';
 
 interface FeaturePhoneModuleProps {
   user: User;
@@ -28,6 +26,8 @@ interface FeaturePhoneModuleProps {
   setSelectedModel: (model: Device | null) => void;
 }
 
+type FlowState = 'idle' | 'device_connected' | 'service_selected' | 'waiting_for_mode' | 'unlocking' | 'success' | 'error' | 'unsupported';
+
 export const FeaturePhoneModule: React.FC<FeaturePhoneModuleProps> = ({
   user,
   usbDevice: initialUsbDevice,
@@ -44,347 +44,379 @@ export const FeaturePhoneModule: React.FC<FeaturePhoneModuleProps> = ({
   setSelectedService,
   setSelectedModel
 }) => {
-  const [isSmartUnlocking, setIsSmartUnlocking] = useState(false);
-  const [smartProgress, setSmartProgress] = useState(0);
+  const [flowState, setFlowState] = useState<FlowState>('idle');
   const [usbDevice, setUsbDevice] = useState<USBDevice | null>(initialUsbDevice);
   const [deviceIdentity, setDeviceIdentity] = useState<DeviceIdentity | null>(null);
+  const [requiredMode, setRequiredMode] = useState<DeviceMode | null>(null);
+  const [instruction, setInstruction] = useState<string>('');
+  const [unlockProgress, setUnlockProgress] = useState(0);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [matchedExploit, setMatchedExploit] = useState<any>(null);
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
 
-  // Auto-start AI sequence if we are in unlocking step
-  React.useEffect(() => {
-    if (step === 'unlocking' && !isSmartUnlocking && usbDevice) {
-      smartUnlock();
-    }
-  }, [step, usbDevice]);
+  const speak = useCallback((text: string) => {
+    if (!ttsEnabled || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  }, [ttsEnabled]);
 
-  const connectDevice = async () => {
-    if (!navigator.usb) {
-      addTerminalLine(`[ERROR] WebUSB API is not supported or is blocked by your browser/policy.`);
-      addTerminalLine(`[HINT] Ensure you are using Chrome/Edge and the page is served over HTTPS.`);
-      return;
-    }
+  const connectDevice = async (showAll = false) => {
     try {
-      const device = await webUsb.requestDevice();
+      const device = showAll 
+        ? await navigator.usb.requestDevice({ filters: [] })
+        : await webUsb.requestDevice();
+      
       await webUsb.connect(device);
       setUsbDevice(device);
       
       const identity = hardwareService.identifyDevice(device);
       setDeviceIdentity(identity);
       
-      addTerminalLine(`[USB] Connected: ${device.productName}`);
-      addTerminalLine(`[IDENT] Chipset: ${identity.chipset} | Mode: ${identity.mode}`);
-      addTerminalLine(`[IDENT] VID: 0x${identity.vid.toString(16).toUpperCase()} | PID: 0x${identity.pid.toString(16).toUpperCase()}`);
+      addTerminalLine(`[USB] Device Connected: ${identity.modelName}`);
+      addTerminalLine(`[IDENT] Mode: ${identity.mode} | VID: 0x${identity.vid.toString(16).toUpperCase()}`);
+
+      if (flowState === 'waiting_for_mode') {
+        if (identity.mode === requiredMode || requiredMode === 'Unknown') {
+          setFlowState('unlocking');
+          speak(`Good, connection established in ${identity.mode} mode. Hang on tight as I perform the unlock.`);
+          startUnlockProcess(identity, matchedExploit);
+        } else {
+          speak(`Device connected, but it's in ${identity.mode} mode. Please follow the instructions to enter ${requiredMode} mode.`);
+        }
+      } else {
+        setFlowState('device_connected');
+        speak(`${identity.modelName} connected. Please choose a service to continue.`);
+      }
     } catch (err) {
       addTerminalLine(`[ERROR] USB Connection failed: ${err}`);
-    }
-  };
-
-  const executeTool = async (name: string, args: any) => {
-    try {
-      const result = await mcpClient.callTool(name, args);
-      return result;
-    } catch (err) {
-      return { error: String(err) };
-    }
-  };
-
-  const smartUnlock = async () => {
-    if (!usbDevice || !user) return;
-    setIsSmartUnlocking(true);
-    setSmartProgress(5);
-    addTerminalLine(`[SMART] Initiating AI-Driven Hardware Handshake...`);
-    
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = "gemini-3.1-pro-preview";
-      
-      const history: any[] = [
-        {
-          role: "user",
-          parts: [{
-            text: `
-              Connected Device: ${usbDevice.productName} (${usbDevice.vendorId}:${usbDevice.productId})
-              Current Mode: ${usbMode}
-              
-              DETERMINISTIC SEQUENCE:
-              1. Call get_device_info to confirm hardware identity (VID/PID).
-              2. Determine chipset family (MTK, SPD, Qualcomm).
-              3. Check hardware://protocols/capabilities to see if the protocol requires a custom loader (DA/FDL/Firehose).
-              4. If a custom loader is required:
-                 a. Query GEMINI.md via fetch_loader_from_github.
-                 b. Push binary to RAM via push_binary_to_device.
-              5. Once stable (or if no loader is required), call execute_protocol_command(command='read_info') to gather IMEI and security patch.
-              6. Execute target operation: ${selectedService}.
-              7. Report final status.
-              
-              Use the provided MCP tools to interact with the hardware.
-            `
-          }]
-        }
-      ];
-
-      let iterations = 0;
-      const MAX_ITERATIONS = 10;
-
-      while (iterations < MAX_ITERATIONS) {
-        iterations++;
-        const toolsResponse = await mcpClient.listTools();
-        const mcpTools = toolsResponse.tools.map((t: any) => ({
-          name: t.name,
-          description: t.description,
-          parameters: t.inputSchema
-        }));
-
-        const response = await ai.models.generateContent({
-          model,
-          contents: history,
-          config: {
-            tools: [{ functionDeclarations: mcpTools }]
-          }
-        });
-
-        const candidate = response.candidates?.[0];
-        if (!candidate) break;
-
-        // Add model's response to history
-        history.push(candidate.content);
-
-        if (candidate.content.parts[0].functionCall) {
-          const functionCalls = candidate.content.parts.filter(p => p.functionCall).map(p => p.functionCall!);
-          const functionResponses = [];
-
-          for (const call of functionCalls) {
-            const result = await executeTool(call.name, call.args);
-            functionResponses.push({
-              functionResponse: {
-                name: call.name,
-                response: result
-              }
-            });
-
-            // Update progress
-            if (call.name === 'fetch_loader_from_github') setSmartProgress(30);
-            if (call.name === 'push_binary_to_device') setSmartProgress(60);
-            if (call.name === 'execute_protocol_command') setSmartProgress(90);
-          }
-
-          // Add function responses to history
-          history.push({
-            role: "function",
-            parts: functionResponses
-          });
-        } else {
-          // No more function calls, we are done
-          addTerminalLine(`[AI] Final Report: ${response.text}`);
-          break;
-        }
+      if (flowState === 'waiting_for_mode') {
+        speak("Connection failed. Please try again.");
       }
+    }
+  };
 
-      addTerminalLine(`[SUCCESS] AI Sequence Completed.`);
-      setSmartProgress(100);
+  const handleServiceSelect = async (serviceId: ServiceType) => {
+    setSelectedService(serviceId);
+    
+    if (!deviceIdentity) return;
+
+    try {
+      addTerminalLine(`> Searching local exploit database for VID:${deviceIdentity.vid.toString(16)} PID:${deviceIdentity.pid.toString(16)} Service:${serviceId}...`);
+      const res = await authFetch(`/api/exploits/match?vid=${deviceIdentity.vid.toString(16).padStart(4, '0').toUpperCase()}&pid=${deviceIdentity.pid.toString(16).padStart(4, '0').toUpperCase()}&service=${serviceId}`);
+      const data = await res.json();
+
+      if (data.found) {
+        setMatchedExploit(data.exploit);
+        setFlowState('service_selected');
+        
+        let targetMode: DeviceMode = 'BROM';
+        let instr = data.exploit.manualSteps ? JSON.parse(data.exploit.manualSteps).join('\n') : '';
+        let speechInstr = '';
+
+        if (deviceIdentity?.chipset.includes('MTK')) {
+          targetMode = 'BROM';
+          speechInstr = `Okay, you'll need to enter BROM mode. Hold volume up and down while connecting the cable.`;
+        } else if (deviceIdentity?.chipset.includes('SPD')) {
+          targetMode = 'Download';
+          speechInstr = `Okay, you'll need to enter Download mode. Hold the boot key while connecting.`;
+        } else {
+          targetMode = 'Fastboot';
+          speechInstr = `Okay, you'll need to enter Fastboot mode.`;
+        }
+
+        setRequiredMode(targetMode);
+        setInstruction(instr || speechInstr);
+        
+        if (deviceIdentity?.mode === targetMode) {
+          setFlowState('unlocking');
+          speak(`Device is already in ${targetMode} mode. Hang on tight as I perform the unlock.`);
+          startUnlockProcess(deviceIdentity, data.exploit);
+        } else {
+          setFlowState('waiting_for_mode');
+          speak(speechInstr);
+        }
+      } else {
+        setFlowState('unsupported');
+        speak(`Sorry, this device and service combination is not currently supported. Please provide your contact info to be notified when it is.`);
+      }
+    } catch (err) {
+      addTerminalLine(`[ERROR] Failed to query exploit DB: ${err}`);
+      setFlowState('error');
+    }
+  };
+
+  const startUnlockProcess = async (identity: DeviceIdentity, exploit: any) => {
+    setUnlockProgress(10);
+    addTerminalLine(`[SYSTEM] Starting ${selectedService} for ${identity.modelName}...`);
+    
+    const commands = exploit.commands ? JSON.parse(exploit.commands) : [];
+    let currentProgress = 10;
+    
+    for (const cmd of commands) {
+      addTerminalLine(`> Executing: ${cmd}`);
+      await new Promise(r => setTimeout(r, 1500));
+      currentProgress += Math.floor(80 / Math.max(commands.length, 1));
+      if (currentProgress > 90) currentProgress = 90;
+      setUnlockProgress(currentProgress);
+    }
+
+    // Simulate finalization
+    setTimeout(async () => {
+      setUnlockProgress(100);
+      setFlowState('success');
+      addTerminalLine(`[SUCCESS] ${selectedService} completed successfully!`);
+      speak(`Success! The ${selectedService} operation has been completed. Your device will now reboot.`);
       setIsComplete(true);
       await uploadLogs('success');
+    }, 2000);
+  };
 
-    } catch (error) {
-      addTerminalLine(`[ERROR] Smart Unlock Failed: ${error}`);
-      await uploadLogs('failed');
-    } finally {
-      setIsSmartUnlocking(false);
+  const handleRequestExploit = async () => {
+    if (!deviceIdentity || !selectedService) return;
+    try {
+      await authFetch("/api/exploits/request", {
+        method: 'POST',
+        body: JSON.stringify({
+          vid: deviceIdentity.vid.toString(16).padStart(4, '0').toUpperCase(),
+          pid: deviceIdentity.pid.toString(16).padStart(4, '0').toUpperCase(),
+          service: selectedService,
+          email: contactEmail,
+          phone: contactPhone
+        })
+      });
+      alert("Request submitted! We will notify you when an exploit is available.");
+      setFlowState('idle');
+      setUsbDevice(null);
+      setDeviceIdentity(null);
+    } catch (err) {
+      alert("Failed to submit request.");
     }
   };
 
   return (
     <div className="space-y-8">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <GlassCard className="flex flex-col gap-8">
-          <div className="flex items-center justify-between">
+        <GlassCard className="flex flex-col gap-8 liquid-glass relative overflow-hidden">
+          <FeaturePhoneBackground />
+          <div className="flex items-center justify-between z-10">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 flex items-center justify-center">
                 <Smartphone className="text-amber-500 w-6 h-6" />
               </div>
               <div>
-                <h3 className="text-xl font-bold text-white">Feature Phone Module</h3>
-                <p className="text-stone-500 text-sm">Specialized for keypad & legacy devices</p>
+                <h3 className="text-xl font-bold text-white">Feature Phone Auto-Unlock</h3>
+                <p className="text-stone-500 text-sm">Conversational Exploit Engine</p>
               </div>
             </div>
-            <div className="px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-              {step === 'selection' ? 'Connection Phase' : 'Unlock Phase'}
-            </div>
+            <button 
+              onClick={() => setTtsEnabled(!ttsEnabled)}
+              className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-stone-400 transition-colors"
+              title={ttsEnabled ? "Disable Voice Prompts" : "Enable Voice Prompts"}
+            >
+              {ttsEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+            </button>
           </div>
 
-          {step === 'selection' && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-4 rounded-3xl bg-white/[0.02] border border-white/5 space-y-2">
-                  <div className="flex items-center gap-2 text-stone-500">
-                    <Cpu className="w-4 h-4" />
-                    <span className="text-[10px] font-bold uppercase tracking-wider">Chipsets</span>
-                  </div>
-                  <p className="text-lg font-bold text-white">MTK, SPD, RDA</p>
-                </div>
-                <div className="p-4 rounded-3xl bg-white/[0.02] border border-white/5 space-y-2">
-                  <div className="flex items-center gap-2 text-stone-500">
-                    <Zap className="w-4 h-4" />
-                    <span className="text-[10px] font-bold uppercase tracking-wider">Speed</span>
-                  </div>
-                  <p className="text-lg font-bold text-white">Ultra-Fast</p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {!navigator.usb && (
-                  <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center gap-3 text-red-500 text-[10px] font-bold uppercase tracking-widest">
-                    <AlertCircle size={16} />
-                    WebUSB Disallowed by Browser Policy
-                  </div>
-                )}
-                <motion.button
-                  whileHover={{ scale: 1.01 }}
-                  whileTap={{ scale: 0.99 }}
-                  onClick={connectDevice}
-                  className={cn(
-                    "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3",
-                    usbDevice ? "bg-stone-800 text-amber-500 border border-amber-500/20" : "bg-white text-stone-950 hover:bg-stone-100"
-                  )}
+          <div className="z-10 min-h-[300px] flex flex-col justify-center">
+            <AnimatePresence mode="wait">
+              {flowState === 'idle' && (
+                <motion.div 
+                  key="idle"
+                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+                  className="text-center space-y-6"
                 >
-                  <Usb className="w-4 h-4" />
-                  {usbDevice ? `Connected: ${usbDevice.productName}` : "Connect Device via USB"}
-                </motion.button>
+                  <div className="w-24 h-24 mx-auto rounded-full bg-amber-500/10 flex items-center justify-center animate-pulse">
+                    <Usb className="w-10 h-10 text-amber-500" />
+                  </div>
+                  <div className="space-y-2">
+                    <h2 className="text-2xl font-black text-white">Connect Your Device</h2>
+                    <p className="text-stone-400 max-w-sm mx-auto">Plug in your Feature Phone via USB to begin auto-detection.</p>
+                  </div>
+                  <button
+                    onClick={() => connectDevice()}
+                    className="px-8 py-4 bg-amber-600 text-stone-950 rounded-2xl font-black uppercase tracking-widest hover:bg-amber-500 transition-all shadow-lg shadow-amber-500/20"
+                  >
+                    Detect Device
+                  </button>
+                </motion.div>
+              )}
 
-                {usbDevice && (
-                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
-                    <div className="p-6 bg-amber-500/5 border border-amber-500/10 rounded-3xl space-y-4">
-                      <label className="text-[10px] font-black text-stone-500 uppercase tracking-widest">Select Service</label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {[
-                          { id: 'FRP', label: 'FRP Bypass' },
-                          { id: 'MDM', label: 'MDM Bypass' },
-                          { id: 'FLASH', label: 'Flash Software' },
-                          { id: 'IMEI', label: 'Repair IMEI' },
-                          { id: 'NVRAM', label: 'NVRAM Management' },
-                          { id: 'RESCUE', label: 'Rescue / Unbrick' },
-                          { id: 'FACTORY', label: 'Factory Reset' }
-                        ].map(s => (
-                          <motion.button
-                            whileHover={{ scale: 1.02 }}
-                            whileTap={{ scale: 0.98 }}
-                            key={s.id}
-                            onClick={() => setSelectedService(s.id as ServiceType)}
-                            className={cn(
-                              "px-4 py-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border",
-                              selectedService === s.id ? "bg-amber-600 border-amber-600 text-stone-950" : "bg-white/5 border-white/5 text-stone-400 hover:text-white"
-                            )}
-                          >
-                            {s.label}
-                          </motion.button>
-                        ))}
-                      </div>
+              {flowState === 'device_connected' && deviceIdentity && (
+                <motion.div 
+                  key="connected"
+                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+                  className="space-y-6"
+                >
+                  <div className="p-6 rounded-3xl bg-amber-500/10 border border-amber-500/20 text-center space-y-2">
+                    <h2 className="text-xl font-black text-white">{deviceIdentity.modelName} Connected</h2>
+                    <p className="text-amber-500 text-sm font-medium">Please choose a service to continue.</p>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-3">
+                    {[
+                      { id: 'NETWORK', label: 'Network Unlock', icon: Unlock },
+                      { id: 'READ_CODE', label: 'Read User Code', icon: ShieldCheck },
+                      { id: 'FLASH', label: 'Read/Write Firmware', icon: Zap },
+                      { id: 'IMEI', label: 'Repair IMEI', icon: Unlock },
+                      { id: 'NVRAM', label: 'NVRAM Management', icon: ShieldCheck },
+                      { id: 'FACTORY', label: 'Format / Reset', icon: AlertCircle },
+                    ].map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => handleServiceSelect(s.id as ServiceType)}
+                        className="p-4 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-amber-500/50 transition-all flex flex-col items-center gap-3 text-center group"
+                      >
+                        <s.icon className="w-6 h-6 text-stone-400 group-hover:text-amber-500 transition-colors" />
+                        <span className="text-xs font-bold text-stone-300 group-hover:text-white">{s.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+
+              {flowState === 'unsupported' && (
+                <motion.div 
+                  key="unsupported"
+                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+                  className="text-center space-y-6"
+                >
+                  <div className="p-6 rounded-3xl bg-red-500/10 border border-red-500/20 space-y-4">
+                    <div className="w-16 h-16 mx-auto rounded-full bg-red-500/20 flex items-center justify-center">
+                      <AlertCircle className="w-8 h-8 text-red-400" />
                     </div>
+                    <h2 className="text-lg font-bold text-white">Device Not Supported</h2>
+                    <p className="text-red-200 text-sm leading-relaxed">
+                      We don't have an automated exploit for this device and service yet.
+                      Provide your contact info and we'll notify you when it's available.
+                    </p>
+                  </div>
 
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      disabled={!selectedService}
-                      onClick={() => {
-                        setSelectedModel({
-                          id: 999999,
-                          model: usbDevice?.productName || 'Feature Phone',
-                          chipset: deviceIdentity?.chipset || 'Unknown',
-                          category: 'feature-phones',
-                          prices: {
-                            FRP: 5,
-                            MDM: 5,
-                            BOOTLOADER: 5,
-                            FLASH: 5,
-                            UPDATE: 5,
-                            RESCUE: 5,
-                            SLOT: 5,
-                            FACTORY: 5,
-                            samsung_read_pit: 0,
-                            samsung_flash_odin: 0,
-                            samsung_reboot: 0
-                          },
-                          brand: 'Generic',
-                          imageUrl: '',
-                          unlockCommand: '',
-                          constraints: '',
-                          createdAt: new Date().toISOString()
-                        });
-                        setStep('payment');
-                      }}
-                      className="w-full py-6 bg-amber-600 text-stone-950 rounded-[2rem] font-black text-sm uppercase tracking-[0.2em] hover:bg-amber-500 shadow-2xl disabled:opacity-30 transition-all"
+                  <div className="space-y-4 text-left">
+                    <div>
+                      <label className="text-xs font-bold text-stone-400 ml-2">Email</label>
+                      <input 
+                        type="email" 
+                        value={contactEmail}
+                        onChange={e => setContactEmail(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white mt-1"
+                        placeholder="you@example.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-stone-400 ml-2">Phone</label>
+                      <input 
+                        type="tel" 
+                        value={contactPhone}
+                        onChange={e => setContactPhone(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white mt-1"
+                        placeholder="+1234567890"
+                      />
+                    </div>
+                    <button
+                      onClick={handleRequestExploit}
+                      className="w-full py-4 bg-amber-600 text-stone-950 rounded-xl font-black uppercase tracking-widest hover:bg-amber-500 transition-all"
                     >
-                      Proceed to Payment
-                    </motion.button>
-                  </motion.div>
-                )}
-              </div>
-            </div>
-          )}
+                      Notify Me
+                    </button>
+                    <button
+                      onClick={() => setFlowState('idle')}
+                      className="w-full py-4 bg-white/5 text-white rounded-xl font-bold hover:bg-white/10 transition-all"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </motion.div>
+              )}
 
-          {step === 'unlocking' && (
-            <div className="space-y-8">
-              <div className="p-6 bg-amber-500/5 border border-amber-500/10 rounded-3xl flex items-center gap-6">
-                <div className="w-16 h-16 rounded-2xl bg-amber-600 flex items-center justify-center text-stone-950 shadow-2xl">
-                  <Cpu size={32} className={isSmartUnlocking ? "animate-pulse" : ""} />
-                </div>
-                <div>
-                  <h3 className="text-xl font-black uppercase tracking-tighter text-white">AI Hardware Handshake</h3>
-                  <p className="text-[10px] font-black text-amber-500 uppercase tracking-widest">
-                    {isSmartUnlocking ? 'Handshaking & Fetching Loaders...' : 'Handshake Complete'}
-                  </p>
-                </div>
-              </div>
+              {flowState === 'waiting_for_mode' && (
+                <motion.div 
+                  key="waiting"
+                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+                  className="text-center space-y-8"
+                >
+                  <div className="p-6 rounded-3xl bg-blue-500/10 border border-blue-500/20 space-y-4">
+                    <div className="w-16 h-16 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
+                      <AlertCircle className="w-8 h-8 text-blue-400" />
+                    </div>
+                    <h2 className="text-lg font-bold text-white">Action Required</h2>
+                    <p className="text-blue-200 text-sm leading-relaxed">{instruction}</p>
+                  </div>
 
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest">
-                  <span className="text-amber-500">AI Progress</span>
-                  <span className="text-white">{smartProgress}%</span>
-                </div>
-                <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                  <motion.div 
-                    initial={{ width: 0 }}
-                    animate={{ width: `${smartProgress}%` }}
-                    className="h-full bg-amber-600"
-                  />
-                </div>
-              </div>
+                  <button
+                    onClick={() => connectDevice()}
+                    className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center gap-3"
+                  >
+                    <Usb className="w-5 h-5" />
+                    Connect in {requiredMode} Mode
+                  </button>
+                </motion.div>
+              )}
 
-              <div className="p-6 bg-white/[0.02] border border-white/5 rounded-3xl space-y-4">
-                <div className="flex items-center gap-3 text-amber-500">
-                  <Zap size={16} />
-                  <span className="text-[10px] font-black uppercase tracking-widest">Active Task</span>
-                </div>
-                <p className="text-sm font-medium text-stone-300">
-                  {smartProgress < 30 ? 'Identifying chipset signature...' :
-                   smartProgress < 60 ? 'Fetching loaders from GitHub...' :
-                   smartProgress < 90 ? 'Injecting binary payload...' :
-                   'Finalizing unlock protocol...'}
-                </p>
-              </div>
-            </div>
-          )}
+              {flowState === 'unlocking' && (
+                <motion.div 
+                  key="unlocking"
+                  initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                  className="text-center space-y-8 py-8"
+                >
+                  <div className="relative w-32 h-32 mx-auto">
+                    <div className="absolute inset-0 border-4 border-amber-500/20 rounded-full" />
+                    <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 100 100">
+                      <circle
+                        cx="50" cy="50" r="48"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                        className="text-amber-500 transition-all duration-500 ease-out"
+                        strokeDasharray="301.59"
+                        strokeDashoffset={301.59 - (301.59 * unlockProgress) / 100}
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center flex-col">
+                      <span className="text-3xl font-black text-white">{unlockProgress}%</span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <h2 className="text-xl font-bold text-white">Unlocking Device...</h2>
+                    <p className="text-amber-500 text-sm font-medium animate-pulse">Please do not disconnect the cable.</p>
+                  </div>
+                </motion.div>
+              )}
+
+              {flowState === 'success' && (
+                <motion.div 
+                  key="success"
+                  initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+                  className="text-center space-y-6 py-8"
+                >
+                  <div className="w-24 h-24 mx-auto rounded-full bg-green-500/20 flex items-center justify-center">
+                    <CheckCircle2 className="w-12 h-12 text-green-500" />
+                  </div>
+                  <div className="space-y-2">
+                    <h2 className="text-2xl font-black text-white">Unlock Successful!</h2>
+                    <p className="text-stone-400">The device has been successfully unlocked and is rebooting.</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setFlowState('idle');
+                      setUsbDevice(null);
+                      setDeviceIdentity(null);
+                    }}
+                    className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-bold transition-all"
+                  >
+                    Unlock Another Device
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </GlassCard>
 
         <div className="space-y-8">
           <Terminal lines={terminalLines} />
-          
-          <GlassCard className="p-6">
-            <h4 className="text-[10px] font-bold text-stone-500 uppercase tracking-widest mb-4">Module Capabilities</h4>
-            <div className="space-y-3">
-              {[
-                "Passcode & Password Removal",
-                "IMEI Repair & NVRAM Management",
-                "Factory Reset & Data Wipe",
-                "DA/FDL Loader Injection",
-                "Chipset Signature Analysis"
-              ].map((cap, i) => (
-                <div key={i} className="flex items-center gap-3 text-xs text-stone-300">
-                  <CheckCircle2 className="w-4 h-4 text-amber-500" />
-                  {cap}
-                </div>
-              ))}
-            </div>
-          </GlassCard>
         </div>
       </div>
     </div>

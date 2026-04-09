@@ -1,7 +1,7 @@
 
 import { webUsb } from './webUsbService';
 
-export type DeviceMode = 'BROM' | 'Preloader' | 'Fastboot' | 'ADB' | 'MTP' | 'Download' | 'EDL' | 'Unknown';
+export type DeviceMode = 'BROM' | 'Preloader' | 'Fastboot' | 'ADB' | 'MTP' | 'Download' | 'EDL' | 'DFU' | 'Unknown';
 
 export interface DeviceIdentity {
   vid: number;

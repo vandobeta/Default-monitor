@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import { cn } from '../../lib/utils';
 
 export const Terminal = ({ lines }: { lines: string[] }) => (
-  <div className="bg-stone-950/80 backdrop-blur-3xl border border-white/5 rounded-3xl p-4 sm:p-8 font-mono text-[11px] leading-relaxed overflow-hidden shadow-2xl">
+  <div className="bg-stone-950/80 backdrop-blur-lg border border-white/5 rounded-3xl p-4 sm:p-8 font-mono text-[11px] leading-relaxed overflow-hidden shadow-2xl">
     <div className="flex items-center justify-between mb-6 border-b border-white/5 pb-4">
       <div className="flex items-center gap-2">
         <div className="flex gap-2">

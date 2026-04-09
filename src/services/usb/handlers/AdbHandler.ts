@@ -64,6 +64,7 @@ export class WebAdbHandler {
    * Performs the ADB handshake.
    */
   async connect(): Promise<void> {
+    await this.transport.connect();
     await this.sendMessage('CNXN', 0x01000000, WebAdbHandler.MAX_PAYLOAD, new TextEncoder().encode('host::\0'));
     const response = await this.receiveMessage();
     

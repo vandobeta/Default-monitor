@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { Smartphone, Zap, Cpu, Unlock, CheckCircle2, AlertCircle, ChevronRight, Usb, ShieldCheck, Terminal as TerminalIcon, Volume2, VolumeX } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { AndroidBackground } from '../../components/Animations/ModuleBackgrounds';
 import { User, Device, ServiceType, AppStep } from '../../types';
 import { GlassCard } from '../../components/Shared/GlassCard';
 import { Terminal } from '../../components/Shared/Terminal';
@@ -203,6 +204,7 @@ export const AndroidModule: React.FC<AndroidModuleProps> = ({
     <div className="space-y-8">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <GlassCard className="flex flex-col gap-8 liquid-glass relative overflow-hidden">
+          <AndroidBackground />
           <div className="flex items-center justify-between z-10">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 flex items-center justify-center">
@@ -263,7 +265,7 @@ export const AndroidModule: React.FC<AndroidModuleProps> = ({
                       { id: 'MDM', label: 'MDM Removal', icon: ShieldCheck },
                       { id: 'NETWORK', label: 'Network Unlock', icon: Unlock },
                       { id: 'BOOTLOADER', label: 'Unlock Bootloader', icon: Unlock },
-                      { id: 'UNBRICK', label: 'Rescue / Unbrick', icon: Zap },
+                      { id: 'FLASH', label: 'Flash Firmware (Odin/Fastboot)', icon: Zap },
                       { id: 'PIN', label: 'Unlock PIN/Pattern', icon: Unlock },
                     ].map(s => (
                       <button

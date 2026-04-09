@@ -56,11 +56,14 @@ import { Terminal } from './components/Shared/Terminal';
 import { PhoneAnimation } from './components/Shared/PhoneAnimation';
 import { ConnectionGuide } from './components/Shared/ConnectionGuide';
 
+import { TopUpModal } from './components/Shared/TopUpModal';
+
 // Modules
 import { FeaturePhoneModule } from './modules/FeaturePhones/FeaturePhoneModule';
 import { IPhoneModule } from './modules/iPhone/IPhoneModule';
 import { AndroidModule } from './modules/Android/AndroidModule';
 import { HuaweiModule } from './modules/Huawei/HuaweiModule';
+import { DeveloperDashboard } from './modules/Developer/DeveloperDashboard';
 
 
 const ADB_COMMANDS = [
@@ -166,6 +169,7 @@ export default function App() {
   const [isComplete, setIsComplete] = useState(false);
   const [appScale, setAppScale] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
+  const [isTopUpModalOpen, setIsTopUpModalOpen] = useState(false);
 
   useEffect(() => {
     const handleResize = () => {
@@ -205,11 +209,23 @@ export default function App() {
   const [adminLogs, setAdminLogs] = useState<any[]>([]);
   const [developerExploits, setDeveloperExploits] = useState<any[]>([]);
   const [unlockCommands, setUnlockCommands] = useState<string[]>([]);
-  const [adminTab, setAdminTab] = useState<'stats' | 'users' | 'devices' | 'transactions' | 'logs' | 'diagnostics'>('stats');
+  const [adminTab, setAdminTab] = useState<'stats' | 'users' | 'devices' | 'transactions' | 'logs' | 'diagnostics' | 'exploits'>('stats');
   const [showPassword, setShowPassword] = useState(false);
   const [sessions, setSessions] = useState<any[]>([]);
   const [showModuleInstructions, setShowModuleInstructions] = useState(false);
   const [moduleInstructionsText, setModuleInstructionsText] = useState('');
+
+  useEffect(() => {
+    // Clear state when switching modules to ensure pure separation
+    setTerminalLines([]);
+    setUsbDevice(null);
+    setUsbHardwareInfo(null);
+    setUsbMode(null);
+    setSelectedModel(null);
+    setSelectedService('');
+    setGeminiPayload(null);
+    setUnlockProgress(0);
+  }, [activeModule]);
 
   const brands = useMemo(() => Array.from(new Set(devices.map(m => m.brand))), [devices]);
   const modelsForBrand = useMemo(() => devices.filter(m => m.brand === selectedBrand), [selectedBrand, devices]);
@@ -544,22 +560,70 @@ export default function App() {
   };
 
   // --- Payment Logic ---
-  const handleLoadCredits = async (amount: number) => {
+  const handleTopUp = async (data: any) => {
     if (!user) return;
     try {
-      const res = await authFetch("/api/paystack/initialize", {
-        method: 'POST',
-        body: JSON.stringify({ amount, email: user.username })
-      });
-      const data = await res.json();
-      if (data.status && data.data && data.data.authorization_url) {
-        window.location.href = data.data.authorization_url;
+      if (data.method === 'card') {
+        const res = await authFetch("/api/paystack/initialize", {
+          method: 'POST',
+          body: JSON.stringify({ amount: data.amount, email: user.username })
+        });
+        const resData = await res.json();
+        if (resData.status && resData.data && resData.data.authorization_url) {
+          window.location.href = resData.data.authorization_url;
+        } else {
+          alert("Failed to initialize payment.");
+        }
       } else {
-        alert("Failed to initialize payment.");
+        const res = await authFetch("/api/paystack/charge-mobile", {
+          method: 'POST',
+          body: JSON.stringify({ 
+            amount: data.amount, 
+            email: user.username,
+            phone: data.phone,
+            provider: data.provider,
+            country: data.country,
+            type: data.method
+          })
+        });
+        const resData = await res.json();
+        if (resData.status && resData.data) {
+          if (resData.data.status === 'pay_offline') {
+            alert(`Please check your phone to complete the payment. Reference: ${resData.data.reference}`);
+          } else if (resData.data.status === 'send_otp') {
+            const otp = prompt("Enter the OTP sent to your phone:");
+            if (otp) {
+              const otpRes = await authFetch("/api/paystack/submit-otp", {
+                method: 'POST',
+                body: JSON.stringify({ otp, reference: resData.data.reference })
+              });
+              const otpData = await otpRes.json();
+              alert(otpData.message || "OTP submitted.");
+            }
+          } else if (resData.data.status === 'send_pin') {
+            const pin = prompt("Enter your PIN:");
+            if (pin) {
+              const pinRes = await authFetch("/api/paystack/submit-pin", {
+                method: 'POST',
+                body: JSON.stringify({ pin, reference: resData.data.reference })
+              });
+              const pinData = await pinRes.json();
+              alert(pinData.message || "PIN submitted.");
+            }
+          } else {
+            alert(resData.message || "Payment initiated.");
+          }
+        } else {
+          alert("Failed to initialize payment: " + (resData.message || "Unknown error"));
+        }
       }
     } catch (err: any) {
       alert("Payment failed: " + err.message);
     }
+  };
+
+  const handleLoadCredits = async (amount: number) => {
+    setIsTopUpModalOpen(true);
   };
 
   // --- WebUSB Logic ---
@@ -1165,8 +1229,9 @@ export default function App() {
                 <span className="text-[8px] font-black text-stone-500 uppercase tracking-widest">Available Balance</span>
                 <span className="text-xl font-black text-amber-500 tracking-tighter">${user.tokens.toFixed(2)}</span>
               </div>
-              <button className="p-3 rounded-2xl bg-white/5 border border-white/5 text-stone-500 hover:text-white transition-all">
-                <Globe size={20} />
+              <button onClick={() => setIsTopUpModalOpen(true)} className="p-3 rounded-2xl bg-amber-600/20 border border-amber-500/30 text-amber-500 hover:bg-amber-600 hover:text-stone-950 transition-all flex items-center gap-2">
+                <Wallet size={20} />
+                <span className="text-xs font-black uppercase tracking-widest hidden lg:block">Top Up</span>
               </button>
             </div>
           </header>
@@ -1378,67 +1443,7 @@ export default function App() {
 
             {view === 'developer' && (
               <motion.div key="developer" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-12">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-                  <div className="space-y-2">
-                    <h1 className="text-3xl sm:text-5xl font-black tracking-tighter uppercase">Developer Portal</h1>
-                    <p className="text-stone-500 text-base lg:text-lg font-medium">Publish exploits and earn 40% commission per unlock.</p>
-                  </div>
-                  <button onClick={() => {
-                    const vid = prompt("Enter VID (e.g., 04E8):");
-                    const pid = prompt("Enter PID (e.g., 6860):");
-                    const service = prompt("Enter Service (e.g., FRP, MDM):");
-                    if (vid && pid && service) {
-                      authFetch("/api/exploits", {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          vid, pid, service,
-                          commands: ["adb shell getprop ro.serialno"],
-                          manualSteps: ["Connect device", "Run exploit"]
-                        })
-                      }).then(() => {
-                        alert("Exploit published successfully!");
-                        fetchAdminData();
-                      });
-                    }
-                  }} className="px-6 py-3 bg-amber-600 text-stone-950 font-bold rounded-xl hover:bg-amber-500 transition-all">
-                    Publish New Exploit
-                  </button>
-                </div>
-
-                <GlassCard className="p-6">
-                  <h2 className="text-xl font-bold text-white mb-6">Your Published Exploits</h2>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-white/10 text-stone-400 text-sm">
-                          <th className="pb-3 font-medium">VID:PID</th>
-                          <th className="pb-3 font-medium">Service</th>
-                          <th className="pb-3 font-medium">Status</th>
-                          <th className="pb-3 font-medium">Date</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-sm">
-                        {developerExploits.map((e: any) => (
-                          <tr key={e.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                            <td className="py-4 text-white font-mono">{e.vid}:{e.pid}</td>
-                            <td className="py-4 text-stone-300">{e.service}</td>
-                            <td className="py-4">
-                              <span className={cn("px-2 py-1 rounded-full text-xs font-bold", e.status === 'approved' ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-400")}>
-                                {e.status.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="py-4 text-stone-400">{new Date(e.created_at).toLocaleDateString()}</td>
-                          </tr>
-                        ))}
-                        {developerExploits.length === 0 && (
-                          <tr>
-                            <td colSpan={4} className="py-8 text-center text-stone-500">No exploits published yet.</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </GlassCard>
+                <DeveloperDashboard authFetch={authFetch} />
               </motion.div>
             )}
 
@@ -1462,7 +1467,7 @@ export default function App() {
                 </div>
 
                 <div className="flex gap-4 border-b border-white/5 pb-4 overflow-x-auto scrollbar-hide">
-                  {(['stats', 'users', 'devices', 'transactions', 'logs', 'diagnostics'] as const).map(tab => {
+                  {(['stats', 'users', 'devices', 'transactions', 'logs', 'exploits', 'diagnostics'] as const).map(tab => {
                     if (tab === 'devices' && user?.role === 'Support') return null;
                     return (
                       <button
@@ -1643,6 +1648,85 @@ export default function App() {
                               ))}
                             </tbody>
                           </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {adminTab === 'exploits' && (
+                      <div className="space-y-6">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-[10px] font-black text-stone-600 uppercase tracking-[0.4em] flex-1 flex items-center gap-6">Exploit Submissions<div className="flex-1 h-px bg-white/5" /></h3>
+                        </div>
+                        <div className="grid grid-cols-1 gap-6">
+                          {developerExploits.map((exploit: any) => (
+                            <div key={exploit.id} className="glass rounded-[2rem] p-6 border-white/[0.02] space-y-4">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-10 h-10 rounded-xl bg-stone-900 flex items-center justify-center text-amber-500">
+                                    <Cpu size={20} />
+                                  </div>
+                                  <div>
+                                    <div className="text-sm font-black uppercase tracking-tighter">VID: {exploit.vid} | PID: {exploit.pid}</div>
+                                    <div className="text-[8px] text-stone-500 font-black uppercase tracking-widest">{exploit.service} | By: {exploit.developer_username} | {new Date(exploit.created_at).toLocaleString()}</div>
+                                  </div>
+                                </div>
+                                <div className={cn(
+                                  "px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest",
+                                  exploit.status === 'approved' ? "bg-green-500/10 text-green-500" : 
+                                  exploit.status === 'rejected' ? "bg-red-500/10 text-red-500" : 
+                                  "bg-amber-500/10 text-amber-500"
+                                )}>
+                                  {exploit.status}
+                                </div>
+                              </div>
+                              <div className="bg-stone-950/40 rounded-xl p-4 font-mono text-[9px] text-stone-400 max-h-40 overflow-y-auto scrollbar-hide">
+                                <div>Commands: {JSON.stringify(exploit.commands)}</div>
+                                <div>Manual Steps: {JSON.stringify(exploit.manual_steps)}</div>
+                              </div>
+                              {exploit.status === 'pending' && (
+                                <div className="flex gap-4 pt-4 border-t border-white/5">
+                                  <button
+                                    onClick={() => {
+                                      authFetch(`/api/exploits/${exploit.id}/analyze`, { method: 'POST' })
+                                        .then(res => res.json())
+                                        .then(data => {
+                                          if (data.success) {
+                                            alert(`Analysis Complete:\nReliability: ${data.analysis.reliabilityScore}\nSummary: ${data.analysis.operationSummary}\nRecommendation: ${data.analysis.recommendation}`);
+                                          } else {
+                                            alert(`Analysis Failed: ${data.error}`);
+                                          }
+                                        });
+                                    }}
+                                    className="flex-1 py-3 bg-blue-600/20 text-blue-500 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600/30 transition-all"
+                                  >
+                                    Analyze with AI
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (confirm("Approve this exploit?")) {
+                                        authFetch(`/api/exploits/${exploit.id}/approve`, { method: 'POST' })
+                                          .then(() => fetchAdminData());
+                                      }
+                                    }}
+                                    className="flex-1 py-3 bg-green-600/20 text-green-500 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-green-600/30 transition-all"
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (confirm("Reject this exploit?")) {
+                                        authFetch(`/api/exploits/${exploit.id}/reject`, { method: 'POST' })
+                                          .then(() => fetchAdminData());
+                                      }
+                                    }}
+                                    className="flex-1 py-3 bg-red-600/20 text-red-500 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-red-600/30 transition-all"
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
                         </div>
                       </div>
                     )}
@@ -2149,7 +2233,12 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
-
+        
+        <TopUpModal 
+          isOpen={isTopUpModalOpen} 
+          onClose={() => setIsTopUpModalOpen(false)} 
+          onTopUp={handleTopUp} 
+        />
       </main>
     </div>
   );

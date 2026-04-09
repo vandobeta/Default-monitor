@@ -13,6 +13,13 @@ export class WebFastbootHandler {
   }
 
   /**
+   * Connects to the device.
+   */
+  async connect(): Promise<void> {
+    await this.transport.connect();
+  }
+
+  /**
    * Sends a command and waits for a response.
    */
   async execute(command: string): Promise<string> {

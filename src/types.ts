@@ -1,5 +1,5 @@
 export type UnlockType = 'light' | 'hard';
-export type ServiceType = 'FRP' | 'MDM' | 'SIM' | 'BOOTLOADER' | 'Mi Account' | 'iCloud' | 'Passcode' | 'FLASH' | 'UPDATE' | 'RESCUE' | 'SLOT' | 'FACTORY' | 'IMEI' | 'NVRAM';
+export type ServiceType = 'FRP' | 'MDM' | 'SIM' | 'BOOTLOADER' | 'Mi Account' | 'iCloud' | 'Passcode' | 'FLASH' | 'UPDATE' | 'RESCUE' | 'SLOT' | 'FACTORY' | 'IMEI' | 'NVRAM' | 'NETWORK' | 'READ_CODE' | 'UNBRICK' | 'PIN' | 'HUAWEI_ID';
 export type UserRole = 'Admin' | 'Technician' | 'Support' | 'User' | 'Developer';
 
 export interface User {
