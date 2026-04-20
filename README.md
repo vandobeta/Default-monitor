@@ -6,7 +6,7 @@
 
 This contains everything you need to run your app locally.
 
-you can try the app by visiting https://ais-pre-pz6skv3piioor5ovzgubbb-637463589662.europe-west2.run.app/
+you can try the app by visiting:https://ais-pre-ymev6nbymzyodypki2asjf-314541989977.europe-west2.run.app
 
 ## Run Locally
 
