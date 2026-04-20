@@ -41,7 +41,7 @@ export function TopUpModal({ isOpen, onClose, onTopUp }: { isOpen: boolean, onCl
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-widest text-stone-500">Amount (USD)</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-stone-500">Amount ({localStorage.getItem('unlockpro_currency') || 'USD'})</label>
             <input 
               type="number" 
               value={amount} 

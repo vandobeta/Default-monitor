@@ -11,6 +11,7 @@ import {
   WebSamsung
 } from './protocols';
 import { mcpServer } from '../mcp/McpServer';
+import { identifyDevice } from './DeviceIdentifier';
 
 export class USBManager {
   private static activeProtocol: USBProtocol | null = null;
@@ -24,30 +25,32 @@ export class USBManager {
       this.sessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
       logger(`[Session] New session initialized: ${this.sessionId}`);
 
+      const vid = device.vendorId.toString(16).padStart(4, '0').toUpperCase();
+      const pid = device.productId.toString(16).padStart(4, '0').toUpperCase();
+      
+      const identity = identifyDevice(vid, pid);
+
       const info = {
-        vendorId: device.vendorId.toString(16).padStart(4, '0'),
-        productId: device.productId.toString(16).padStart(4, '0'),
+        vendorId: vid,
+        productId: pid,
         serialNumber: device.serialNumber || 'Unknown',
-        manufacturerName: device.manufacturerName || 'Unknown',
-        productName: device.productName || 'Unknown',
+        manufacturerName: device.manufacturerName || identity.vendor,
+        productName: device.productName || 'Unknown Device',
         usbVersion: `${device.usbVersionMajor}.${device.usbVersionMinor}`,
         deviceClass: device.deviceClass,
         deviceSubclass: device.deviceSubclass,
         deviceProtocol: device.deviceProtocol,
-        mode: 'Unknown'
+        mode: identity.mode !== 'Unknown Mode' ? identity.mode : 'Unknown',
+        description: identity.description
       };
 
       // Master Routing Table for Device Detection
       let ProtocolClass: new (device: USBDevice) => USBProtocol;
 
-      // Normalize IDs to uppercase for consistent matching
-      const vid = info.vendorId.toUpperCase();
-      const pid = info.productId.toUpperCase();
-
       if (vid === '18D1' && pid === 'D00D') {
         info.mode = 'Fastboot';
         ProtocolClass = WebFastboot;
-      } else if (vid === '18D1' && pid === '4EE0') {
+      } else if (vid === '18D1' && (pid === '4EE0' || pid === '4EE2' || pid === '4EE7')) {
         info.mode = 'ADB';
         ProtocolClass = WebADB;
       } else if (vid === '05C6' && pid === '9008') {
@@ -76,13 +79,16 @@ export class USBManager {
         ProtocolClass = WebFastboot;
       } else {
         // Default to MTP if we can't determine, or if it's a standard media device
-        info.mode = 'MTP/Unknown';
+        info.mode = info.mode !== 'Unknown' ? info.mode : 'MTP/Unknown';
         ProtocolClass = WebMTP;
       }
 
       logger(`[USB] Device Connected: ${info.manufacturerName} ${info.productName}`);
       logger(`[USB] VID: 0x${info.vendorId} PID: 0x${info.productId}`);
       logger(`[USB] Detected Mode: ${info.mode}`);
+      if (info.description !== 'No description available') {
+        logger(`[USB] Description: ${info.description}`);
+      }
 
       // Update MCP Server context
       mcpServer.setActiveDevice(device);

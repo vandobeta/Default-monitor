@@ -14,6 +14,10 @@ import morgan from "morgan";
 import multer from "multer";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import AdmZip from "adm-zip";
+import crypto from "crypto";
+import fs from "fs";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -26,7 +30,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" }
 });
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "unlockpro-secret-key";
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "";
 
@@ -94,9 +98,21 @@ const db = new Database(dbPath);
       status TEXT DEFAULT 'approved', -- 'pending', 'approved'
       file_url TEXT,
       price REAL DEFAULT 0,
+      rating REAL DEFAULT 0,
+      success_count INTEGER DEFAULT 0,
+      fail_count INTEGER DEFAULT 0,
       verified_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(developer_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      event_type TEXT,
+      screen TEXT,
+      details TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS exploit_requests (
@@ -107,6 +123,27 @@ const db = new Database(dbPath);
       phone TEXT,
       notified INTEGER DEFAULT 0,
       notified_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS live_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      vid TEXT,
+      pid TEXT,
+      model TEXT,
+      service TEXT,
+      status TEXT DEFAULT 'pending',
+      tech_id INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS live_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER,
+      sender TEXT,
+      message TEXT,
+      command TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -155,6 +192,9 @@ const db = new Database(dbPath);
       if (!columnNames.includes('file_url')) try { db.exec("ALTER TABLE exploits ADD COLUMN file_url TEXT"); } catch (e) {}
       if (!columnNames.includes('price')) try { db.exec("ALTER TABLE exploits ADD COLUMN price REAL DEFAULT 0"); } catch (e) {}
       if (!columnNames.includes('verified_at')) try { db.exec("ALTER TABLE exploits ADD COLUMN verified_at DATETIME"); } catch (e) {}
+      if (!columnNames.includes('rating')) try { db.exec("ALTER TABLE exploits ADD COLUMN rating REAL DEFAULT 0"); } catch (e) {}
+      if (!columnNames.includes('success_count')) try { db.exec("ALTER TABLE exploits ADD COLUMN success_count INTEGER DEFAULT 0"); } catch (e) {}
+      if (!columnNames.includes('fail_count')) try { db.exec("ALTER TABLE exploits ADD COLUMN fail_count INTEGER DEFAULT 0"); } catch (e) {}
     }
     if (table === 'exploit_requests') {
       if (!columnNames.includes('notified')) try { db.exec("ALTER TABLE exploit_requests ADD COLUMN notified INTEGER DEFAULT 0"); } catch (e) {}
@@ -166,23 +206,31 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
+// Static routes for exploits
+app.use('/exploits/bundles', express.static(path.join(__dirname, 'exploits', 'bundles')));
+app.use('/exploits/indexes', express.static(path.join(__dirname, 'exploits', 'indexes')));
+
 // Rate Limiting
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: "Too many requests from this IP, please try again after 15 minutes",
+  windowMs: 15 * 60 * 1000,
+  max: 1000, // Increased from 100
+  message: "Too many requests from this IP",
   validate: { xForwardedForHeader: false }
 });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: "Too many login attempts, please try again later",
+  max: 200, // Increased from 20
+  message: "Too many login attempts",
   validate: { xForwardedForHeader: false }
 });
 
 app.use("/api/", apiLimiter);
 app.use("/api/auth/", authLimiter);
+
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
+});
 
 // File Uploads (Multer)
 const storage = multer.diskStorage({
@@ -198,12 +246,12 @@ const storage = multer.diskStorage({
 const upload = multer({ 
   storage: storage,
   fileFilter: (req, file, cb) => {
-    const allowedExtensions = ['.bin', '.pak', '.hex', '.da', '.fdl', '.js', '.py', '.sh', '.json'];
+    const allowedExtensions = ['.bin', '.pak', '.hex', '.da', '.fdl', '.js', '.py', '.sh', '.json', '.zip'];
     const ext = path.extname(file.originalname).toLowerCase();
     if (allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only binaries and scripts are allowed.'));
+      cb(new Error('Invalid file type. Only binaries, scripts, and zip bundles are allowed.'));
     }
   },
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
@@ -477,28 +525,95 @@ app.get("/api/paystack/verify", authenticate, async (req: any, res) => {
 });
 
 // --- Exploits API ---
+const SERVICE_CODES: Record<string, string> = {
+  'frp': '234', 'mdm': '445', 'pin': '125', 'passcode': '125', 'carrier': '345', 'network': '345',
+  'FRP': '234', 'MDM': '445', 'PIN': '125', 'PASSCODE': '125', 'CARRIER': '345', 'NETWORK': '345'
+};
+
+const BRAND_CODES: Record<string, string> = {
+  'apple': '356', 'samsung': '258', 'huawei': '349', 'vivo': '421',
+  'Apple': '356', 'Samsung': '258', 'Huawei': '349', 'Vivo': '421'
+};
+
 app.get("/api/exploits/match", authenticate, (req: any, res) => {
-  const { vid, pid, service } = req.query;
+  const { vid, pid, service, brand } = req.query;
   
   if (!vid || !pid || !service) {
     return res.status(400).json({ error: "Missing parameters" });
   }
 
+  // Check DB first
   const exploit: any = db.prepare("SELECT * FROM exploits WHERE vid = ? AND pid = ? AND service = ? AND status = 'approved'").get(vid, pid, service);
   
   if (exploit) {
-    res.json({
+    return res.json({
       found: true,
       exploit: {
         id: exploit.id,
         commands: JSON.parse(exploit.commands || '[]'),
         manualSteps: JSON.parse(exploit.manual_steps || '[]'),
-        developerId: exploit.developer_id
+        developerId: exploit.developer_id,
+        fileUrl: exploit.file_url
       }
     });
-  } else {
-    res.json({ found: false });
   }
+
+  // Check for files matching the new format in the bundles directory
+  const sCode = SERVICE_CODES[service as string];
+  const bCode = BRAND_CODES[brand as string];
+  
+  if (sCode && bCode) {
+    const bundlesDir = path.join(__dirname, 'exploits', 'bundles');
+    if (fs.existsSync(bundlesDir)) {
+      const files = fs.readdirSync(bundlesDir);
+      // Pattern: exploits[4 digits][serviceCode][6 digits][brandCode][vid][pid].bundle.crypt
+      const vHex = (vid as string).toUpperCase().padStart(4, '0');
+      const pHex = (pid as string).toUpperCase().padStart(4, '0');
+      const pattern = new RegExp(`^exploits\\d{4}${sCode}\\d{6}${bCode}${vHex}${pHex}\\.bundle\\.crypt$`);
+      const matchedFile = files.find(f => pattern.test(f));
+      
+      if (matchedFile) {
+        return res.json({
+          found: true,
+          exploit: {
+            id: 'bundle-' + matchedFile,
+            commands: [],
+            manualSteps: [],
+            developerId: null,
+            fileUrl: `/exploits/bundles/${matchedFile}`
+          }
+        });
+      }
+    }
+  }
+
+  // Check Brand Index JSON if provided (Legacy/Fallback)
+  if (brand) {
+    const brandKey = (brand as string).toLowerCase().replace(/\s+/g, '');
+    const indexPath = path.join(__dirname, 'exploits', 'indexes', `${brandKey}exploit.json`);
+    if (fs.existsSync(indexPath)) {
+      try {
+        const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+        const matchedBundle = indexData.find((e: any) => e.vid === vid && e.pid === pid);
+        if (matchedBundle) {
+          return res.json({
+            found: true,
+            exploit: {
+              id: 'bundle-' + matchedBundle.filename,
+              commands: [],
+              manualSteps: [],
+              developerId: null,
+              fileUrl: matchedBundle.path
+            }
+          });
+        }
+      } catch (e) {
+        console.error("Error reading index file", e);
+      }
+    }
+  }
+
+  res.json({ found: false });
 });
 
 app.post("/api/exploits/request", authenticate, (req: any, res) => {
@@ -514,28 +629,219 @@ app.post("/api/exploits/request", authenticate, (req: any, res) => {
   res.json({ success: true });
 });
 
+// Live Help Endpoints
+app.post("/api/live-help/request", authenticate, (req: any, res) => {
+  const { vid, pid, model, service } = req.body;
+  try {
+    const info = db.prepare("INSERT INTO live_requests (user_id, vid, pid, model, service) VALUES (?, ?, ?, ?, ?)")
+      .run(req.user.id, vid, pid, model, service);
+    
+    io.emit("live-help:requests-updated"); // Notify techs of new request
+      
+    res.json({ success: true, requestId: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.get("/api/live-help/requests", authorize(['Admin', 'Developer', 'Technician']), (req: any, res) => {
+  try {
+    const requests = db.prepare(`
+      SELECT lr.*, u.username as user_email 
+      FROM live_requests lr 
+      JOIN users u ON lr.user_id = u.id 
+      WHERE lr.status = 'pending' OR lr.tech_id = ?
+      ORDER BY lr.created_at DESC
+    `).all(req.user.id);
+    res.json(requests);
+  } catch (err) {
+    console.error("Error fetching live requests:", err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.post("/api/live-help/:id/accept", authorize(['Admin', 'Developer', 'Technician']), (req: any, res) => {
+  try {
+    db.prepare("UPDATE live_requests SET status = 'active', tech_id = ? WHERE id = ? AND status = 'pending'")
+      .run(req.user.id, req.params.id);
+    
+    io.to(`live-help-${req.params.id}`).emit("live-help:accepted");
+    io.emit("live-help:requests-updated"); // Notify other techs to refresh their lists
+      
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
 // Developer UI APIs
-app.get("/api/exploits", authorize(['Admin', 'Developer']), (req: any, res) => {
+app.get("/api/exploits", authenticate, (req: any, res) => {
   let exploits;
   if (req.user.role === 'Admin') {
-    exploits = db.prepare("SELECT e.*, u.username as developer_username FROM exploits e JOIN users u ON e.developer_id = u.id ORDER BY e.created_at DESC").all();
+    exploits = db.prepare("SELECT e.*, u.username as developer_username FROM exploits e JOIN users u ON e.developer_id = u.id ORDER BY e.rating DESC, e.created_at DESC").all();
+  } else if (req.user.role === 'Developer') {
+    exploits = db.prepare("SELECT * FROM exploits WHERE developer_id = ? ORDER BY rating DESC, created_at DESC").all(req.user.id);
   } else {
-    exploits = db.prepare("SELECT * FROM exploits WHERE developer_id = ? ORDER BY created_at DESC").all(req.user.id);
+    // Regular users can only see approved exploits, sorted by rating
+    exploits = db.prepare("SELECT id, vid, pid, cid, service, price, rating, success_count, fail_count FROM exploits WHERE status = 'approved' ORDER BY rating DESC, created_at DESC").all();
   }
   
   res.json(exploits.map((e: any) => ({
     ...e,
-    commands: JSON.parse(e.commands || '[]'),
-    manual_steps: JSON.parse(e.manual_steps || '[]')
+    commands: e.commands ? JSON.parse(e.commands || '[]') : [],
+    manual_steps: e.manual_steps ? JSON.parse(e.manual_steps || '[]') : []
   })));
 });
 
-app.post("/api/exploits", authorize(['Admin', 'Developer']), upload.single('file'), (req: any, res) => {
+app.post("/api/analytics", authenticate, (req: any, res) => {
   try {
-    const exploitData = req.body.exploitData ? JSON.parse(req.body.exploitData) : req.body;
-    const { vid, pid, cid, service, commands, manualSteps, price } = exploitData;
-    const fileUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    const { event_type, screen, details } = req.body;
+    db.prepare(`
+      INSERT INTO analytics_logs (user_id, event_type, screen, details)
+      VALUES (?, ?, ?, ?)
+    `).run(req.user.id, event_type, screen, JSON.stringify(details || {}));
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
+app.post("/api/exploits/:id/rate", authenticate, (req: any, res) => {
+  try {
+    const { success } = req.body;
+    const exploitId = req.params.id;
+    
+    if (success) {
+      db.prepare("UPDATE exploits SET success_count = success_count + 1, rating = (success_count + 1.0) / (success_count + fail_count + 1.0) * 5 WHERE id = ?").run(exploitId);
+    } else {
+      db.prepare("UPDATE exploits SET fail_count = fail_count + 1, rating = (success_count * 1.0) / (success_count + fail_count + 1.0) * 5 WHERE id = ?").run(exploitId);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/exploits", authorize(['Admin', 'Developer']), upload.single('file'), async (req: any, res) => {
+  try {
+    let vid, pid, cid, service, commands, manualSteps, price;
+    let fileUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    let isBundle = req.file && (req.file.originalname.endsWith('.zip') || req.file.originalname.endsWith('.crypt'));
+    
+    if (isBundle) {
+      // Bundle Upload Logic
+      const zip = new AdmZip(req.file.path);
+      const zipEntries = zip.getEntries();
+      
+      const manifestEntry = zipEntries.find(e => e.entryName === 'manifest.json');
+      const scriptEntry = zipEntries.find(e => e.entryName === 'script.ts');
+      
+      if (!manifestEntry || !scriptEntry) {
+        return res.status(400).json({ error: "Invalid bundle: missing manifest.json or script.ts" });
+      }
+      
+      const manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
+      const scriptContent = scriptEntry.getData().toString('utf8');
+      
+      // Step 1: Integrity Check
+      if (manifest.checksums) {
+        for (const [filename, expectedHash] of Object.entries(manifest.checksums)) {
+          const fileEntry = zipEntries.find(e => e.entryName === `loaders/${filename}` || e.entryName === filename);
+          if (fileEntry) {
+            const fileData = fileEntry.getData();
+            const actualHash = crypto.createHash('md5').update(fileData).digest('hex');
+            if (actualHash !== expectedHash) {
+              return res.status(400).json({ error: `Integrity check failed for ${filename}` });
+            }
+          }
+        }
+      }
+      
+      // Step 2: AI Audit (Phase One)
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const prompt = `You are a security auditor. Review the following TypeScript execution script for an unlock tool. 
+          Respond with exactly "SAFE" if it appears to be a standard unlocking script (e.g., erasing FRP, rebooting). 
+          Respond with "MALICIOUS" if it contains infinite loops, attempts to wipe critical partitions like NVRAM/IMEI, or executes arbitrary shell commands outside of standard fastboot/edl/mtk protocols.
+          
+          Script:
+          ${scriptContent}`;
+          
+          const aiResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt,
+          });
+          
+          const auditResult = aiResponse.text?.trim().toUpperCase();
+          if (auditResult?.includes("MALICIOUS")) {
+            return res.status(400).json({ error: "AI Audit Failed: Script flagged as potentially malicious." });
+          }
+        } catch (aiError) {
+          console.error("AI Audit error:", aiError);
+          // Proceed anyway if AI fails, or we could block it. Let's proceed but log it.
+        }
+      }
+      
+      // Map manifest to DB fields
+      vid = manifest.target?.vid || '';
+      pid = manifest.target?.pid || '';
+      cid = manifest.target?.cid || manifest.target?.chipset || '';
+      service = manifest.id || 'BUNDLE';
+      commands = [scriptContent]; // Store the script as the command
+      manualSteps = manifest.capabilities || [];
+      price = req.body.price || 0;
+
+      // Update brand-specific index file
+      const brand = (manifest.target?.brand || 'custom').toLowerCase().replace(/\s+/g, '');
+      const indexDir = path.join(__dirname, 'exploits', 'indexes');
+      const bundlesDir = path.join(__dirname, 'exploits', 'bundles');
+      
+      // Ensure directories exist
+      if (!fs.existsSync(indexDir)) fs.mkdirSync(indexDir, { recursive: true });
+      if (!fs.existsSync(bundlesDir)) fs.mkdirSync(bundlesDir, { recursive: true });
+
+      // Move the uploaded file to the bundles directory
+      const newFilename = req.file.originalname;
+      const newFilePath = path.join(bundlesDir, newFilename);
+      fs.copyFileSync(req.file.path, newFilePath);
+      fileUrl = `/exploits/bundles/${newFilename}`;
+
+      const indexPath = path.join(indexDir, `${brand}exploit.json`);
+      let indexData = [];
+      if (fs.existsSync(indexPath)) {
+        try {
+          indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+        } catch (e) {}
+      }
+      
+      indexData.push({
+        filename: newFilename,
+        path: fileUrl,
+        vid,
+        pid,
+        cid,
+        processor: manifest.target?.processor || '',
+        model: manifest.target?.model || '',
+        mode: manifest.target?.mode || '',
+        uploadedAt: new Date().toISOString()
+      });
+      
+      fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2));
+      
+    } else {
+      // Legacy Upload Logic
+      const exploitData = req.body.exploitData ? JSON.parse(req.body.exploitData) : req.body;
+      vid = exploitData.vid;
+      pid = exploitData.pid;
+      cid = exploitData.cid;
+      service = exploitData.service;
+      commands = exploitData.commands;
+      manualSteps = exploitData.manualSteps;
+      price = exploitData.price;
+    }
+
+    // Step 3: Registration
     const info = db.prepare(`
       INSERT INTO exploits (vid, pid, cid, service, commands, manual_steps, developer_id, status, file_url, price)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
@@ -650,7 +956,7 @@ app.post("/api/exploits/:id/reject", authorize(['Admin']), (req: any, res) => {
   
   db.prepare("UPDATE exploits SET status = 'rejected' WHERE id = ?").run(exploitId);
   
-  const exploit: any = db.prepare("SELECT e.*, u.email as developer_email FROM exploits e JOIN users u ON e.developer_id = u.id WHERE e.id = ?").get(exploitId);
+  const exploit: any = db.prepare("SELECT e.*, u.username as developer_email FROM exploits e JOIN users u ON e.developer_id = u.id WHERE e.id = ?").get(exploitId);
   
   if (exploit) {
     console.log(`[Notification] Exploit ${exploitId} rejected. Notifying developer at ${exploit.developer_email}.`);
@@ -742,6 +1048,25 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     console.log(`Socket ${socket.id} joined room ${roomId}`);
     socket.to(roomId).emit("user-joined", socket.id);
+  });
+
+  socket.on("live-help:join", (requestId) => {
+    const room = `live-help-${requestId}`;
+    socket.join(room);
+    console.log(`Socket ${socket.id} joined live help room ${room}`);
+  });
+
+  socket.on("live-help:message", ({ requestId, sender, message, command }) => {
+    const room = `live-help-${requestId}`;
+    try {
+      db.prepare("INSERT INTO live_messages (request_id, sender, message, command) VALUES (?, ?, ?, ?)")
+        .run(requestId, sender, message || '', command || '');
+      
+      const msg = { sender, message, command, created_at: new Date().toISOString() };
+      io.to(room).emit("live-help:new-message", msg);
+    } catch (err) {
+      console.error("Failed to save live message", err);
+    }
   });
 
   socket.on("usb:packet", ({ roomId, packet }) => {
@@ -914,19 +1239,34 @@ app.get("/api/auth/me", authenticate, (req: any, res) => {
 
 // Devices Management
 app.get("/api/devices", (req, res) => {
-  const devices = db.prepare("SELECT * FROM devices").all();
-  res.json(devices.map((d: any) => ({
-    id: d.id,
-    brand: d.brand,
-    model: d.model,
-    chipset: d.chipset,
-    imageUrl: d.image_url,
-    category: d.category,
-    prices: JSON.parse(d.prices || '{}'),
-    unlockCommands: JSON.parse(d.unlock_commands || '{}'),
-    constraints: JSON.parse(d.constraints || '{}'),
-    createdAt: d.created_at
-  })));
+  console.log(`[GET] /api/devices - Request from ${req.ip}`);
+  try {
+    const devices = db.prepare("SELECT * FROM devices").all();
+    res.json(devices.map((d: any) => {
+      let prices = {};
+      let unlockCommands = {};
+      let constraints = {};
+      try { prices = JSON.parse(d.prices || '{}'); } catch (e) {}
+      try { unlockCommands = JSON.parse(d.unlock_commands || '{}'); } catch (e) {}
+      try { constraints = JSON.parse(d.constraints || '{}'); } catch (e) {}
+      
+      return {
+        id: d.id,
+        brand: d.brand,
+        model: d.model,
+        chipset: d.chipset,
+        imageUrl: d.image_url,
+        category: d.category,
+        prices,
+        unlockCommands,
+        constraints,
+        createdAt: d.created_at
+      };
+    }));
+  } catch (err) {
+    console.error("Error fetching devices:", err);
+    res.status(500).json({ error: "Failed to fetch devices" });
+  }
 });
 
 app.post("/api/devices", authorize(['Admin', 'Technician']), (req, res) => {

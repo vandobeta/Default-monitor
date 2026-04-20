@@ -9,11 +9,15 @@ import { HuaweiKirinHandler } from './handlers/HuaweiHandler';
  * Mock USB Transport for Diagnostic Testing
  * Captures written data and provides predefined responses to verify driver logic.
  */
-class MockUSBTransport implements USBTransport {
+class MockUSBTransport extends USBTransport {
   public writtenData: Uint8Array[] = [];
   public controlTransfersOut: any[] = [];
   private readQueue: Uint8Array[] = [];
   private controlInQueue: Uint8Array[] = [];
+
+  constructor() {
+    super({} as USBDevice);
+  }
 
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}

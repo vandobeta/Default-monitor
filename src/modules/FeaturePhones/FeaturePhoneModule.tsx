@@ -77,7 +77,7 @@ export const FeaturePhoneModule: React.FC<FeaturePhoneModuleProps> = ({
       setDeviceIdentity(identity);
       
       addTerminalLine(`[USB] Device Connected: ${identity.modelName}`);
-      addTerminalLine(`[IDENT] Mode: ${identity.mode} | VID: 0x${identity.vid.toString(16).toUpperCase()}`);
+      addTerminalLine(`[IDENT] Mode: ${identity.mode}`);
 
       if (flowState === 'waiting_for_mode') {
         if (identity.mode === requiredMode || requiredMode === 'Unknown') {
@@ -105,8 +105,20 @@ export const FeaturePhoneModule: React.FC<FeaturePhoneModuleProps> = ({
     if (!deviceIdentity) return;
 
     try {
-      addTerminalLine(`> Searching local exploit database for VID:${deviceIdentity.vid.toString(16)} PID:${deviceIdentity.pid.toString(16)} Service:${serviceId}...`);
-      const res = await authFetch(`/api/exploits/match?vid=${deviceIdentity.vid.toString(16).padStart(4, '0').toUpperCase()}&pid=${deviceIdentity.pid.toString(16).padStart(4, '0').toUpperCase()}&service=${serviceId}`);
+      addTerminalLine(`> Searching local exploit database for ${deviceIdentity.modelName} Service:${serviceId}...`);
+      
+      // Log analytics
+      authFetch('/api/analytics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'service_selected',
+          screen: 'FeaturePhoneModule',
+          details: { model: deviceIdentity.modelName, service: serviceId }
+        })
+      }).catch(e => console.error(e));
+
+      const res = await authFetch(`/api/exploits/match?vid=${deviceIdentity.vid.toString(16).padStart(4, '0').toUpperCase()}&pid=${deviceIdentity.pid.toString(16).padStart(4, '0').toUpperCase()}&service=${serviceId}&brand=${deviceIdentity.brand}`);
       const data = await res.json();
 
       if (data.found) {
